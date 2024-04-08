@@ -22,6 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "serialLinBuff.h"
+#include <stdint.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,6 +65,240 @@ static void MX_USART2_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+#define pc_uart &huart1
+#define device_uart &huart2
+
+uint8_t uartByteBuff[1];
+uint8_t uartByteBuff2[1];
+serialLinBuff_t serialLinBuff;
+serialLinBuff_t serialLinBuff2;
+
+uint8_t parsedWeightValue[8];
+uint8_t parsedWeightValueLength = 0;
+
+void indicateOnLED(uint8_t channelNum);
+
+uint8_t parseTextMessage(char *textMessage, uint8_t textMessageLength, uint8_t *parsedTextMessage);
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if(huart == pc_uart)
+  {
+    serialLinBuffAddChar(&serialLinBuff, uartByteBuff[0]);
+    HAL_UART_Receive_IT(pc_uart, uartByteBuff, 1);
+  }
+  else if(huart == device_uart)
+  {
+    serialLinBuffAddChar(&serialLinBuff2, uartByteBuff2[0]);
+    HAL_UART_Receive_IT(device_uart, uartByteBuff2, 1);
+  }
+}
+
+
+uint8_t AT_Flag = 0;
+
+// Define the maximum channel number
+#define MAX_CHANNEL_NUMBER 10
+
+// Global variables
+volatile uint32_t buttonTimer = 0;
+
+
+void plus_one(uint8_t *digits, uint8_t n) {
+    int carry = 1; // Start with 1 to add it to the least significant digit
+
+    for (int i = n - 1; i >= 0; i--) {
+        // Add carry to the current digit
+        digits[i] += carry;
+
+        // Update carry for next iteration
+        carry = (digits[i] > '9') ? 1 : 0;
+
+        // Update current digit to the remainder after adding carry
+        digits[i] = (digits[i] > '9') ? '0' : digits[i];
+    }
+
+    // If carry is still present after processing all digits, handle it accordingly
+    if (carry != 0) {
+        // You can handle overflow here according to your application requirements
+        // For simplicity, let's assume the array has enough space to accommodate the new digit
+        digits[0] = '1';
+    }
+}
+
+void HC12_Set()
+{
+    // Check if AT_Flag is set to 1
+    if (AT_Flag == 1)
+    {
+        // Set the HC-12 module to AT mode
+        HAL_GPIO_WritePin(HC12_SET_GPIO_Port, HC12_SET_Pin, GPIO_PIN_RESET);
+        HAL_Delay(1000); // Wait for 1 second for the module to enter AT mode
+
+        
+
+        // Send "AT+RC" command to module to read the channel number
+        HAL_UART_Transmit(device_uart, (uint8_t *)"AT+RC\r\n", 7, 1000);
+
+        // Create variables to store channel information
+        uint8_t channelNumber[MAX_CHANNEL_NUMBER];
+        uint8_t channelNum = 0;
+        uint8_t channelNumLength = 0;
+
+        // Wait until serialLinBuffReady(&serialLinBuff2) is set to 1
+        while (serialLinBuffReady(&serialLinBuff2) == 0);
+
+        // Extract the channel number from received data
+        for (int i = 0; i < serialLinBuff2.currIndex; i++)
+        {
+            if (serialLinBuff2.buff[i] >= '0' && serialLinBuff2.buff[i] <= '9')
+            {
+                channelNumber[channelNumLength] = serialLinBuff2.buff[i];
+                channelNumLength++;
+            }
+        }
+        serialLinBuffReset(&serialLinBuff2);
+
+        // Convert channelNumber to integer
+        for (int i = 0; i < channelNumLength; i++)
+        {
+            channelNum = channelNum * 10 + (channelNumber[i] - '0');
+        }
+
+        // Reset buttonTimer
+        buttonTimer = 0;
+
+        // HAL_UART_Transmit(pc_uart, (uint8_t *)"Channel number currently is: ", 28, 1000);
+        // HAL_UART_Transmit(pc_uart, (uint8_t *)channelNumber, channelNumLength, 1000);
+        // HAL_UART_Transmit(pc_uart, (uint8_t *)"\n", 1, 1000);
+        // HAL_UART_Transmit(pc_uart, (uint8_t *)"\r", 1, 1000);
+
+
+        // Start the button press timer
+        HAL_TIM_Base_Start_IT(&htim3);
+
+        // Loop to increase the channel number by 1
+        while (AT_Flag == 1)
+        {
+            // Check if the button is pressed
+            if (HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
+            {
+                HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, 1);
+                buttonTimer = 0; // Reset the timer
+                HAL_Delay(300); // Debounce the button
+
+                // Increase the channel number by 1
+                channelNum++;
+                if (channelNum > MAX_CHANNEL_NUMBER)
+                {
+                    /// Assing the channel number to 000. We will increase it by 1 before sending it to the HC-12 module
+                    channelNumber[0] = '0';
+                    channelNumber[1] = '0';
+                    channelNumber[2] = '0';
+                    channelNum = 1; // Wrap around if channel number exceeds maximum
+                }
+
+                plus_one(channelNumber, channelNumLength);
+
+                HAL_UART_Transmit(device_uart, (uint8_t *)"AT+C", 4, 1000);
+                HAL_UART_Transmit(device_uart, channelNumber, channelNumLength, 1000);
+                HAL_UART_Transmit(device_uart, (uint8_t *)"\r\n", 2, 1000);
+
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"AT+C", 4, 1000);
+                // HAL_UART_Transmit(pc_uart, channelNumber, channelNumLength, 1000);
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"\r\n", 2, 1000);
+
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"Channel number is set to: ", 26, 1000);
+                // HAL_UART_Transmit(pc_uart, channelNumber, channelNumLength, 1000);
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"\n", 1, 1000);
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"\r", 1, 1000);
+                
+                HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, 0);
+
+            }
+
+            // Check if buttonTimer exceeds 5000 (5 seconds)
+            if (buttonTimer >= 5000)
+            {
+                // Exit AT mode
+                AT_Flag = 0;
+                // HAL_UART_Transmit(pc_uart, (uint8_t *)"Stop AT mode\r\n", 14, 1000);
+                HAL_GPIO_WritePin(HC12_SET_GPIO_Port, HC12_SET_Pin, GPIO_PIN_SET); // Set the HC-12 module to normal mode
+                break;
+            }
+        }
+
+        indicateOnLED(channelNum);
+
+    }
+    else
+    {
+        HAL_GPIO_WritePin(HC12_SET_GPIO_Port, HC12_SET_Pin, GPIO_PIN_SET); // Set the HC-12 module to normal mode
+    }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == htim3.Instance)
+    {
+        buttonTimer++; // Increment the timer variable
+    }
+}
+
+
+
+void indicateOnLED(uint8_t channelNum)
+{
+    for (int i = 0; i < channelNum; i++)
+    {
+        HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+        HAL_Delay(200);
+        HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+        HAL_Delay(800);
+    }
+}
+
+
+
+/// Parse the incomming text message
+/// Get only the digits and '.' from the text message
+/// The parsedTextMessageLength have to be 8 
+/// For example textMessage = "ST,GS,01  9.35 kg". We have parsed the text message to "9.35". It is 4 caracters long. Fill the rest with 0 and make it 00009.35
+uint8_t parseTextMessage(char *textMessage, uint8_t textMessageLength, uint8_t *parsedTextMessage)
+{
+    uint8_t parsedTextMessageLength = 8;
+    for (int i = textMessageLength - 1; i >= 0; i--)
+    {
+        if ((textMessage[i] >= '0' && textMessage[i] <= '9') || textMessage[i] == '.')
+        {
+            parsedTextMessageLength--;
+            parsedTextMessage[parsedTextMessageLength] = textMessage[i];
+        }
+        else if(textMessage[i] == '-')
+        {
+            /// Sett the parsedTextMessage to '---'
+            parsedTextMessage[0] = '-';
+            parsedTextMessage[1] = '-';
+            parsedTextMessage[2] = '-';
+            parsedTextMessage[3] = 0;
+            parsedTextMessage[4] = 0;
+            parsedTextMessage[5] = 0;
+            parsedTextMessage[6] = 0;
+            parsedTextMessage[7] = 0;        
+
+            
+            return (uint8_t)8;
+        }
+    }
+
+    for (int i = 0; i < parsedTextMessageLength; i++)
+    {
+        parsedTextMessage[i] = '0';
+    }
+    return (uint8_t)8;
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -97,6 +334,64 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  HAL_UART_Receive_IT(pc_uart, uartByteBuff, 1); // Start reception for PC USART
+  HAL_UART_Receive_IT(device_uart, uartByteBuff2, 1); // Start reception for Device USART
+
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+
+  
+
+  /// Transmit 'AT+RC' to the HC-12 module
+  HAL_UART_Transmit(device_uart, (uint8_t *)"AT+RC\r\n", 7, 1000);
+
+  /// Create a buffer to store the channel number
+  uint8_t channelNumber[10];
+  /// Create a variable to store the channel number
+  uint8_t channelNum = 0;
+  /// Create a variable to store the channel number length
+  uint8_t channelNumLength = 0;
+  /// Wait until serialLinBuffReady(&serialLinBuff2) is set to 1
+  while (serialLinBuffReady(&serialLinBuff2) == 0)
+  {
+    // HAL_UART_Transmit(pc_uart, (uint8_t *)"Waiting for the channel number\r\n", 32, 1000);
+    
+  }
+
+  /// If serialLinBuffReady(&serialLinBuff2) is set to 1
+  if(serialLinBuffReady(&serialLinBuff2))
+  {
+    /// Copy the serialLinBuff2.buff to the channelNumber
+    for(int i = 0; i < serialLinBuff2.currIndex; i++)
+    {
+      if(serialLinBuff2.buff[i] >= '0' && serialLinBuff2.buff[i] <= '9')
+      {
+        channelNumber[channelNumLength] = serialLinBuff2.buff[i];
+        channelNumLength++;
+      }
+    }
+    serialLinBuffReset(&serialLinBuff2);
+  }
+
+  /// SAve the channel number to the flash memory
+  // Flash_Write_Data(HC12_CHANNEL_NUMBER_ADDRESS, (uint32_t *)channelNumber, channelNumLength);
+
+  // HAL_UART_Transmit(pc_uart, (uint8_t *)"Channel number is: ", 19, 1000);
+  // HAL_UART_Transmit(pc_uart, (uint8_t *)channelNumber, channelNumLength, 1000);
+  // HAL_UART_Transmit(pc_uart, (uint8_t *)"\n", 1, 1000);
+  // HAL_UART_Transmit(pc_uart, (uint8_t *)"\r", 1, 1000);
+
+  /// Convert the channelNumber to a number
+  for(int i = 0; i < channelNumLength; i++)
+  {
+    channelNum = channelNum * 10 + (channelNumber[i] - '0');
+  }
+
+  indicateOnLED(channelNum);
+
+  HAL_GPIO_WritePin(HC12_SET_GPIO_Port, HC12_SET_Pin, GPIO_PIN_SET);
+
+  // HAL_UART_Transmit(pc_uart, (uint8_t *)"Starting_the_while_loop\r\n", 25, 1000);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -106,6 +401,57 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if(HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
+    {
+      /// If the button is pressed for 5 seconds, set the HC-12 module to AT mode
+      /// After that, call the AT mode function
+      HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+      /// wait for 5 seconds
+      HAL_Delay(5000);
+      /// Check the button state again
+      if(HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin) == GPIO_PIN_SET)
+      {
+        // /// Set the AT_Flag to 1
+        AT_Flag = 1;
+        // /// Set the HC-12 module to AT mode
+        HAL_GPIO_WritePin(HC12_SET_GPIO_Port, HC12_SET_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+
+        HAL_UART_Transmit(pc_uart, (uint8_t *)"AT mode is in set mode\r\n", 24, 1000);
+        HC12_Set();
+
+        HAL_UART_Transmit(pc_uart, (uint8_t *)"AT mode is in normal mode\r\n", 26, 1000);
+        // while (1)
+        // {
+        //   /* code */
+        // }
+        
+      }
+      HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+    }
+
+    if(serialLinBuffReady(&serialLinBuff))
+    {
+      parsedWeightValueLength = parseTextMessage(serialLinBuff.buff, serialLinBuff.currIndex, parsedWeightValue);
+      HAL_UART_Transmit(device_uart, (uint8_t *)parsedWeightValue, parsedWeightValueLength, 1000);
+
+      // HAL_UART_Transmit(pc_uart, (uint8_t *)"Parsed weight value: ", 21, 1000);
+      // HAL_UART_Transmit(pc_uart, (uint8_t *)parsedWeightValue, parsedWeightValueLength, 1000);
+      // HAL_UART_Transmit(pc_uart, (uint8_t *)"\n", 1, 1000);
+      // HAL_UART_Transmit(pc_uart, (uint8_t *)"\r", 1, 1000);
+
+      serialLinBuffReset(&serialLinBuff);
+
+
+    }
+
+    if(serialLinBuffReady(&serialLinBuff2))
+    {
+      HAL_UART_Transmit(pc_uart, (uint8_t *)serialLinBuff2.buff, serialLinBuff2.currIndex, 1000);
+
+      serialLinBuffReset(&serialLinBuff2);
+    }
+  
   }
   /* USER CODE END 3 */
 }

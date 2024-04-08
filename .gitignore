@@ -1,0 +1,8 @@
+/.cproject
+/.mxproject
+/.project
+/.settings
+/Debug
+/Drivers
+/hc12_trans_f0.ioc
+/STM32F030C8TX_FLASH.ld
